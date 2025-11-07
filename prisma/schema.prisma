@@ -1,0 +1,272 @@
+// Prisma schema for AI Finance Tracker
+// Based on the schema design from PRD.md
+
+generator client {
+  provider = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  extensions = [vector]
+}
+
+// User model - stores user profile and preferences
+model User {
+  id                String    @id @default(cuid())
+  clerkId           String    @unique // Clerk user ID for authentication
+  email             String    @unique
+  name              String?
+  onboardingState   String    @default("new") // new, preferences_set, first_upload_complete, completed
+  preferences       Json?     // Store user preferences like currency, country, theme
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  // Relations
+  accounts          Account[]
+  documents         Document[]
+  transactions      Transaction[]
+  categories        Category[]
+  insights          Insight[]
+  goals             Goal[]
+  alerts            Alert[]
+  rules             Rule[]
+  auditLogs         AuditLog[]
+  embeddings        Embedding[]
+
+  @@index([clerkId])
+  @@index([email])
+}
+
+// Account model - financial institution accounts
+model Account {
+  id              String    @id @default(cuid())
+  userId          String
+  institution     String    // Bank or institution name
+  accountType     String    // checking, savings, credit_card, etc.
+  lastSyncAt      DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions    Transaction[]
+
+  @@index([userId])
+}
+
+// Document model - uploaded files (CSV, PDF, OFX, etc.)
+model Document {
+  id              String    @id @default(cuid())
+  userId          String
+  storageKey      String    // Path to file in storage
+  fileName        String
+  fileType        String    // csv, pdf, ofx, qfx, qbo
+  source          String    // upload, bank_sync, etc.
+  status          String    @default("pending") // pending, processing, completed, failed
+  metadata        Json?     // Additional file metadata
+  uploadedAt      DateTime  @default(now())
+  processedAt     DateTime?
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transactions    Transaction[]
+
+  @@index([userId])
+  @@index([status])
+}
+
+// Transaction model - individual financial transactions
+model Transaction {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String?
+  sourceDocumentId      String?
+
+  // Transaction details
+  date                  DateTime
+  amount                Decimal   @db.Decimal(12, 2)
+  currency              String    @default("USD")
+  merchantRaw           String    // Original merchant name from statement
+  merchantNormalized    String?   // Cleaned/normalized merchant name
+  description           String    // Transaction description
+
+  // Categorization
+  categoryId            String?
+  subcategoryId         String?
+  confidence            Decimal?  @db.Decimal(3, 2) // 0.00 to 1.00
+
+  // Flags and metadata
+  isTransfer            Boolean   @default(false)
+  metadata              Json?     // Additional transaction data
+  hash                  String    @unique // For deduplication
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  // Relations
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  account               Account?  @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  sourceDocument        Document? @relation(fields: [sourceDocumentId], references: [id], onDelete: SetNull)
+  category              Category? @relation("TransactionCategory", fields: [categoryId], references: [id], onDelete: SetNull)
+  subcategory           Category? @relation("TransactionSubcategory", fields: [subcategoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([accountId])
+  @@index([categoryId])
+  @@index([date])
+  @@index([hash])
+}
+
+// Category model - spending categories with hierarchical structure
+model Category {
+  id              String    @id @default(cuid())
+  userId          String?   // null = global default category, not null = user custom
+  name            String
+  parentId        String?   // For subcategories
+  rules           Json?     // Auto-categorization rules
+  icon            String?   // Icon identifier
+  color           String?   // Color for visualization
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user                        User?       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent                      Category?   @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  subcategories               Category[]  @relation("CategoryHierarchy")
+  transactionsAsCategory      Transaction[] @relation("TransactionCategory")
+  transactionsAsSubcategory   Transaction[] @relation("TransactionSubcategory")
+  goals                       Goal[]
+  alerts                      Alert[]
+
+  @@unique([userId, name, parentId])
+  @@index([userId])
+  @@index([parentId])
+}
+
+// Insight model - AI-generated insights and recommendations
+model Insight {
+  id              String    @id @default(cuid())
+  userId          String
+  type            String    // trend, outlier, subscription, savings_opportunity, goal_progress
+  title           String
+  body            String    @db.Text
+  severity        String    @default("info") // info, warning, alert
+  references      Json?     // References to transactions, categories, etc.
+  createdAt       DateTime  @default(now())
+  dismissedAt     DateTime?
+  helpful         Boolean?  // User feedback
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([type])
+  @@index([createdAt])
+}
+
+// Goal model - budgets, savings targets, debt payoff
+model Goal {
+  id              String    @id @default(cuid())
+  userId          String
+  type            String    // budget, savings, debt
+  title           String
+  targetAmount    Decimal   @db.Decimal(12, 2)
+  period          String    // monthly, quarterly, yearly, one_time
+  categoryId      String?   // Optional: link to specific category
+  startDate       DateTime
+  endDate         DateTime?
+  status          String    @default("active") // active, completed, archived
+  progress        Decimal   @default(0) @db.Decimal(12, 2)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category        Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([status])
+  @@index([startDate])
+  @@index([endDate])
+}
+
+// Alert model - notification rules for spending alerts
+model Alert {
+  id              String    @id @default(cuid())
+  userId          String
+  type            String    // large_transaction, unusual_spend, budget_threshold, subscription_renewal
+  threshold       Decimal?  @db.Decimal(12, 2) // Amount threshold if applicable
+  categoryId      String?   // Optional: category-specific alert
+  channel         String    @default("email") // email, push, sms
+  active          Boolean   @default(true)
+  metadata        Json?     // Additional alert configuration
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category        Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([active])
+}
+
+// Rule model - user-defined rules for auto-categorization and actions
+model Rule {
+  id              String    @id @default(cuid())
+  userId          String
+  ruleType        String    // merchant, description, amount, date
+  pattern         String    // Regex or exact match pattern
+  action          String    // set_category, flag, ignore
+  actionValue     String?   // Category ID or flag value
+  priority        Int       @default(0) // Higher priority rules run first
+  enabled         Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relations
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([enabled])
+  @@index([priority])
+}
+
+// AuditLog model - security and compliance tracking
+model AuditLog {
+  id              String    @id @default(cuid())
+  userId          String?
+  actor           String    // User ID or system identifier
+  action          String    // create, update, delete, export, etc.
+  entityType      String    // transaction, category, goal, etc.
+  entityId        String?
+  changes         Json?     // Before/after changes
+  ipAddress       String?
+  userAgent       String?
+  timestamp       DateTime  @default(now())
+
+  // Relations
+  user            User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([entityType])
+  @@index([timestamp])
+}
+
+// Embedding model - vector embeddings for merchant normalization
+model Embedding {
+  id              String    @id @default(cuid())
+  userId          String?   // null = global, not null = user-specific
+  term            String    // Merchant name or term
+  vector          Unsupported("vector(1536)")?  // Vector embedding (OpenAI ada-002 is 1536 dimensions)
+  metadata        Json?     // Additional context
+  createdAt       DateTime  @default(now())
+
+  // Relations
+  user            User?     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([term])
+}
