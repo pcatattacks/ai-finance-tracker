@@ -52,7 +52,7 @@ export async function categorizeTransaction(
 
   if (!apiKey) {
     // Fallback to rule-based categorization if no API key
-    return ruleBased Categorization(merchant, description, amount);
+    return ruleBasedCategorization(merchant, description, amount);
   }
 
   // Build the prompt with few-shot examples
